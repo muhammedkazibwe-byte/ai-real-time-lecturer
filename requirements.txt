@@ -1,0 +1,10 @@
+streamlit
+langchain
+langchain-community
+langchain-groq
+langchain-chroma
+langchain-huggingface
+pypdf
+huggingface-hub
+sentence-transformers
+youtube-search-python
