@@ -1,29 +1,54 @@
-import gradio as gr
+import streamlit as st
 from langchain_community.document_loaders import PyPDFLoader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_chroma import Chroma
 from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_groq import ChatGroq
 from langchain_core.messages import HumanMessage, AIMessage
-from gtts import gTTS
-import io
 import os
 import tempfile
+from gtts import gTTS
+import io
+import time
+from huggingface_hub import login
 
-# ───────────────────────────────────────────────
-# Global variables
-vectorstore = None
+# Login to Hugging Face (removes warning)
+from huggingface_hub import login
+login("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")  # ← replace with your token or use os.getenv("HF_TOKEN")
 
-def load_textbooks(uploaded_files=None):
-    global vectorstore
+st.set_page_config(page_title="AI Lecturer", layout="wide")
+
+st.title("🎓 AI Lecturer")
+st.caption("Upload textbooks or use pre-loaded ones → Ask questions → Get explanations, references & voice")
+
+# Sidebar
+with st.sidebar:
+    st.header("Settings")
+    api_key = st.text_input("Groq API Key", type="password")
+    level = st.selectbox("Explanation Level", ["Beginner", "Intermediate", "Advanced"], index=1)
+    course = st.text_input("Course", "Biology / Medicine")
+    topic = st.text_input("Focus Topic", "Lung Cancer")
+
+if not api_key:
+    st.info("Enter Groq API key.")
+    st.stop()
+
+uploaded_files = st.sidebar.file_uploader("Upload PDFs", accept_multiple_files=True, type="pdf")
+
+if "vectorstore" not in st.session_state:
+    st.session_state.vectorstore = None
+
+if st.sidebar.button("Process / Load Textbooks"):
     docs = []
+    sources = []
 
-    # Priority: uploaded files
     if uploaded_files:
-        for file_path in uploaded_files:
-            loader = PyPDFLoader(file_path)
-            docs.extend(loader.load())
-    # Fallback: pre-loaded folder
+        for file in uploaded_files:
+            with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
+                tmp.write(file.getvalue())
+                loader = PyPDFLoader(tmp.name)
+                docs.extend(loader.load())
+            sources.append(f"Uploaded: {file.name}")
     else:
         textbook_dir = "textbooks"
         if os.path.exists(textbook_dir):
@@ -32,167 +57,102 @@ def load_textbooks(uploaded_files=None):
                     path = os.path.join(textbook_dir, filename)
                     loader = PyPDFLoader(path)
                     docs.extend(loader.load())
+                    sources.append(f"Pre-loaded: {filename}")
 
     if not docs:
-        return "No PDFs found. Upload files or add PDFs to 'textbooks/' folder."
-
-    text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
-    chunks = text_splitter.split_documents(docs)
-
-    embeddings = HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2")
-    vectorstore = Chroma.from_documents(
-        documents=chunks,
-        embedding=embeddings,
-        collection_name="lecturer_docs"
-    )
-
-    return f"Loaded {len(chunks)} chunks successfully."
-
-def chat(message, history, api_key, explanation_level, course, topic):
-    if not api_key:
-        yield "Please enter your Groq API key.", None
-
-    if not vectorstore:
-        yield "Please process textbooks first.", None
-
-    # Build context from RAG
-    retriever = vectorstore.as_retriever(search_kwargs={"k": 5})
-    docs = retriever.invoke(message)
-    context = "\n\n".join([d.page_content for d in docs])
-
-    llm = ChatGroq(
-        model="llama-3.3-70b-versatile",
-        api_key=api_key,
-        temperature=0.7
-    )
-
-    system_prompt = f"""You are a patient, clear university lecturer teaching {course} with focus on {topic}.
-Explain at {explanation_level} level.
-Always base answers on the provided textbook content when available.
-Be encouraging and ask follow-up questions to check understanding.
-
-Textbook context:
-{context}"""
-
-    messages = [HumanMessage(content=system_prompt)] + [
-        HumanMessage(content=m[0]) if m[0] else AIMessage(content=m[1])
-        for m in history
-    ] + [HumanMessage(content=message)]
-
-    # Stream response
-    full_response = ""
-    for chunk in llm.stream(messages):
-        full_response += chunk.content
-        yield full_response, None
-
-    # Save last response for voice
-    global last_response
-    last_response = full_response
-
-    yield full_response, None
-
-def speak_response():
-    global last_response
-    if not last_response or not last_response.strip():
-        return None
-
-    sentences = [s.strip() for s in last_response.split('. ') if s.strip()]
-    audio_files = []
-
-    for sentence in sentences:
-        clean = sentence + "."
-        tts = gTTS(clean, lang='en', slow=False)
-        buf = io.BytesIO()
-        tts.write_to_fp(buf)
-        buf.seek(0)
-        audio_files.append(buf)
-
-    # Return first sentence for now (Gradio can only play one at a time)
-    # You can extend to concatenate or play sequentially in frontend
-    return audio_files[0] if audio_files else None
-
-def video_search(message):
-    if not message:
-        return "Ask a question first."
-
-    query = message.strip()[:120].replace(" ", "+") + "+explained+simply"
-    url = f"https://www.youtube.com/results?search_query={query}"
-    return f"**[Watch explanatory videos on YouTube]({url})**"
-
-# ───────────────────────────────────────────────
-# Gradio Interface
-with gr.Blocks(title="AI Real-Time Lecturer") as demo:
-    gr.Markdown("# 🎓 AI Real-Time Lecturer")
-    gr.Markdown("Upload textbooks or use the `textbooks/` folder → Ask questions → Get voice answers")
-
-    with gr.Row():
-        api_key = gr.Textbox(label="Groq API Key", type="password")
-        explanation_level = gr.Dropdown(
-            choices=["Beginner", "Intermediate", "Advanced"],
-            value="Intermediate",
-            label="Explanation Level"
+        st.error("No PDFs available.")
+    else:
+        text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
+        chunks = text_splitter.split_documents(docs)
+        embeddings = HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2")
+        st.session_state.vectorstore = Chroma.from_documents(
+            documents=chunks,
+            embedding=embeddings,
+            collection_name="lecturer_docs"
         )
-    course = gr.Textbox(label="Course", value="Biology / Medicine")
-    topic = gr.Textbox(label="Topic", value="Lung Cancer")
+        st.sidebar.success(f"Loaded {len(chunks)} chunks")
+        st.sidebar.write("Sources:")
+        for s in sources:
+            st.sidebar.write(f"- {s}")
 
-    pdf_upload = gr.File(file_types=[".pdf"], file_count="multiple", label="Upload PDFs (optional)")
-    load_btn = gr.Button("Process Textbooks / Load Pre-collected")
+# Chat
+if "messages" not in st.session_state:
+    st.session_state.messages = []
 
-    status = gr.Textbox(label="Status", interactive=False)
+for msg in st.session_state.messages:
+    with st.chat_message(msg["role"]):
+        st.markdown(msg["content"])
 
-    chatbot = gr.Chatbot(height=400)
-    msg = gr.Textbox(label="Type your question")
-    voice_btn = gr.Button("🎤 Speak Question (5 sec record)")
-    voice_audio = gr.Audio(source="microphone", type="filepath", label="Speak now")
+if prompt := st.chat_input("Ask anything..."):
+    st.session_state.messages.append({"role": "user", "content": prompt})
+    with st.chat_message("user"):
+        st.markdown(prompt)
 
-    with gr.Row():
-        send_btn = gr.Button("Send")
-        speak_btn = gr.Button("🔊 Listen to Response")
-        video_btn = gr.Button("🎥 Find Video")
+    with st.chat_message("assistant"):
+        with st.spinner("Thinking..."):
+            context = "No textbook loaded."
+            references = []
 
-    # ─── Event Handlers ──────────────────────────────────────────
+            if st.session_state.vectorstore:
+                retriever = st.session_state.vectorstore.as_retriever(search_kwargs={"k": 5})
+                relevant_docs = retriever.invoke(prompt)
+                context = "\n\n".join([doc.page_content for doc in relevant_docs])
+                for doc in relevant_docs:
+                    source = doc.metadata.get("source", "Unknown")
+                    snippet = doc.page_content[:150] + "..."
+                    references.append(f"{source}: {snippet}")
 
-    load_btn.click(
-        fn=load_textbooks,
-        inputs=[pdf_upload],
-        outputs=status
-    )
+            llm = ChatGroq(model="llama-3.3-70b-versatile", api_key=api_key, temperature=0.7)
 
-    def user_speak(audio_path):
-        if not audio_path:
-            return "", ""
-        # Whisper transcription would go here
-        # For now placeholder
-        return "Transcribed: (implement Whisper here)", ""
+            system_prompt = f"""You are a lecturer teaching {course} on {topic}.
+Explain at {level} level.
+Use textbook content when available.
 
-    voice_btn.click(
-        fn=user_speak,
-        inputs=voice_audio,
-        outputs=[msg, status]
-    )
+Context: {context}"""
 
-    def submit_chat(message, history, api_key, level, course, topic):
-        if not message.strip():
-            return history, ""
-        # Simulate response (replace with real chat fn)
-        history.append((message, "Thinking..."))
-        return history, ""
+            messages = [HumanMessage(content=system_prompt)] + [
+                HumanMessage(content=m["content"]) if m["role"] == "user" else AIMessage(content=m["content"])
+                for m in st.session_state.messages[-8:]
+            ]
 
-    send_btn.click(
-        fn=chat,
-        inputs=[msg, chatbot, api_key, explanation_level, course, topic],
-        outputs=[chatbot, status]
-    )
+            response = llm.invoke(messages)
+            st.markdown(response.content)
 
-    speak_btn.click(
-        fn=speak_response,
-        outputs=gr.Audio(label="AI Voice Response")
-    )
+            if references:
+                with st.expander("📚 References"):
+                    for ref in references:
+                        st.write(ref)
 
-    video_btn.click(
-        fn=video_search,
-        inputs=msg,
-        outputs=status
-    )
+            st.session_state.last_response = response.content
+            st.session_state.messages.append({"role": "assistant", "content": response.content})
 
-demo.launch()
+    if st.button("🎤 Voice Reply"):
+        st.info("Voice input coming soon — type for now.")
+
+# Voice output
+if 'last_response' not in st.session_state:
+    st.session_state.last_response = ""
+
+if st.button("🔊 Listen to Response"):
+    if st.session_state.last_response.strip():
+        with st.spinner("Generating voice..."):
+            tts = gTTS(st.session_state.last_response, lang='en', slow=True)
+            buf = io.BytesIO()
+            tts.write_to_fp(buf)
+            buf.seek(0)
+            st.audio(buf, format="audio/mp3")
+    else:
+        st.warning("No response yet.")
+
+# Video
+if st.button("🎥 Find video"):
+    if st.session_state.messages:
+        q = st.session_state.messages[-1]["content"]
+        query = q.replace(" ", "+") + "+explained+simply"
+        url = f"https://www.youtube.com/results?search_query={query}"
+        st.markdown(f"[YouTube videos]({url})")
+    else:
+        st.info("Ask first.")
+
+st.caption("Built in Kampala • Groq + LangChain")
+
