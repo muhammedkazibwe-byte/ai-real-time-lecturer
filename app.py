@@ -24,7 +24,7 @@ st.caption("Upload textbooks or use pre-loaded ones → Ask questions → Get ex
 # Sidebar
 with st.sidebar:
     st.header("Settings")
-    api_key = st.text_input("Groq API Key", type="password")
+    api_key = "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"  
     level = st.selectbox("Explanation Level", ["Beginner", "Intermediate", "Advanced"], index=1)
     course = st.text_input("Course", "Biology / Medicine")
     topic = st.text_input("Focus Topic", "Lung Cancer")
